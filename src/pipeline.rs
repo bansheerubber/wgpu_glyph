@@ -1,7 +1,7 @@
 mod cache;
 
 use crate::Region;
-use cache::Cache;
+pub use cache::Cache;
 
 use bytemuck::{Pod, Zeroable};
 use core::num::NonZeroU64;
@@ -12,7 +12,6 @@ use std::mem;
 pub struct Pipeline<Depth> {
     transform: wgpu::Buffer,
     sampler: wgpu::Sampler,
-    cache: Cache,
     uniform_layout: wgpu::BindGroupLayout,
     uniforms: wgpu::BindGroup,
     raw: wgpu::RenderPipeline,
@@ -28,16 +27,14 @@ impl Pipeline<()> {
         device: &wgpu::Device,
         filter_mode: wgpu::FilterMode,
         render_format: wgpu::TextureFormat,
-        cache_width: u32,
-        cache_height: u32,
+        cache: &Cache
     ) -> Pipeline<()> {
         build(
             device,
             filter_mode,
             render_format,
             None,
-            cache_width,
-            cache_height,
+            cache,
         )
     }
 
@@ -69,16 +66,14 @@ impl Pipeline<wgpu::DepthStencilState> {
         filter_mode: wgpu::FilterMode,
         render_format: wgpu::TextureFormat,
         depth_stencil_state: wgpu::DepthStencilState,
-        cache_width: u32,
-        cache_height: u32,
+        cache: &Cache
     ) -> Pipeline<wgpu::DepthStencilState> {
         build(
             device,
             filter_mode,
             render_format,
             Some(depth_stencil_state),
-            cache_width,
-            cache_height,
+            cache
         )
     }
 
@@ -106,33 +101,30 @@ impl Pipeline<wgpu::DepthStencilState> {
 }
 
 impl<Depth> Pipeline<Depth> {
-    pub fn update_cache(
-        &mut self,
-        device: &wgpu::Device,
-        staging_belt: &mut wgpu::util::StagingBelt,
-        encoder: &mut wgpu::CommandEncoder,
-        offset: [u16; 2],
-        size: [u16; 2],
-        data: &[u8],
-    ) {
-        self.cache
-            .update(device, staging_belt, encoder, offset, size, data);
-    }
+    // pub fn update_cache(
+    //     &mut self,
+    //     device: &wgpu::Device,
+    //     staging_belt: &mut wgpu::util::StagingBelt,
+    //     encoder: &mut wgpu::CommandEncoder,
+    //     offset: [u16; 2],
+    //     size: [u16; 2],
+    //     data: &[u8],
+    // ) {
+    //     self.cache
+    //         .update(device, staging_belt, encoder, offset, size, data);
+    // }
 
     pub fn increase_cache_size(
         &mut self,
         device: &wgpu::Device,
-        width: u32,
-        height: u32,
+        cache: &Cache
     ) {
-        self.cache = Cache::new(device, width, height);
-
         self.uniforms = create_uniforms(
             device,
             &self.uniform_layout,
             &self.transform,
             &self.sampler,
-            &self.cache.view,
+            &cache.view,
         );
     }
 
@@ -193,8 +185,7 @@ fn build<D>(
     filter_mode: wgpu::FilterMode,
     render_format: wgpu::TextureFormat,
     depth_stencil: Option<wgpu::DepthStencilState>,
-    cache_width: u32,
-    cache_height: u32,
+    cache: &Cache
 ) -> Pipeline<D> {
     use wgpu::util::DeviceExt;
 
@@ -214,8 +205,6 @@ fn build<D>(
         mipmap_filter: filter_mode,
         ..Default::default()
     });
-
-    let cache = Cache::new(device, cache_width, cache_height);
 
     let uniform_layout =
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -338,7 +327,6 @@ fn build<D>(
     Pipeline {
         transform,
         sampler,
-        cache,
         uniform_layout,
         uniforms,
         raw,
@@ -361,6 +349,7 @@ fn draw<D>(
     region: Option<Region>,
 ) {
     if transform != pipeline.current_transform {
+        
         let mut transform_view = staging_belt.write_buffer(
             encoder,
             &pipeline.transform,

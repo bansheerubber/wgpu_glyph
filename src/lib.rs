@@ -32,8 +32,14 @@ use log::{log_enabled, warn};
 ///
 /// Build using a [`GlyphBrushBuilder`](struct.GlyphBrushBuilder.html).
 pub struct GlyphBrush<Depth, F = ab_glyph::FontArc, H = DefaultSectionHasher> {
-    pipeline: Pipeline<Depth>,
     glyph_brush: glyph_brush::GlyphBrush<Instance, Extra, F, H>,
+
+    cache: pipeline::Cache,
+    filter_mode: wgpu::FilterMode,
+    render_format: wgpu::TextureFormat,
+    depth_stencil_state: Option<wgpu::DepthStencilState>,
+    data_index: usize,
+    data: Vec<Pipeline<Depth>>,
 }
 
 impl<Depth, F: Font, H: BuildHasher> GlyphBrush<Depth, F, H> {
@@ -142,24 +148,17 @@ where
         staging_belt: &mut wgpu::util::StagingBelt,
         encoder: &mut wgpu::CommandEncoder,
     ) {
-        let pipeline = &mut self.pipeline;
-
         let mut brush_action;
 
         loop {
+            let cache = &mut self.cache;
+            
             brush_action = self.glyph_brush.process_queued(
                 |rect, tex_data| {
                     let offset = [rect.min[0] as u16, rect.min[1] as u16];
                     let size = [rect.width() as u16, rect.height() as u16];
 
-                    pipeline.update_cache(
-                        device,
-                        staging_belt,
-                        encoder,
-                        offset,
-                        size,
-                        tex_data,
-                    );
+                    cache.update(device, staging_belt, encoder, offset, size, tex_data);
                 },
                 Instance::from_vertex,
             );
@@ -194,7 +193,11 @@ where
                         );
                     }
 
-                    pipeline.increase_cache_size(device, new_width, new_height);
+                    self.cache = pipeline::Cache::new(device, new_width, new_height);
+                    for pipeline in self.data.iter_mut() {
+                        pipeline.increase_cache_size(device, &self.cache);
+                    }
+
                     self.glyph_brush.resize_texture(new_width, new_height);
                 }
             }
@@ -202,7 +205,7 @@ where
 
         match brush_action.unwrap() {
             BrushAction::Draw(verts) => {
-                self.pipeline.upload(device, staging_belt, encoder, &verts);
+                self.data[self.data_index].upload(device, staging_belt, encoder, &verts);
             }
             BrushAction::ReDraw => {}
         };
@@ -218,15 +221,16 @@ impl<F: Font + Sync, H: BuildHasher> GlyphBrush<(), F, H> {
     ) -> Self {
         let glyph_brush = raw_builder.build();
         let (cache_width, cache_height) = glyph_brush.texture_dimensions();
+
         GlyphBrush {
-            pipeline: Pipeline::<()>::new(
-                device,
-                filter_mode,
-                render_format,
-                cache_width,
-                cache_height,
-            ),
             glyph_brush,
+
+            cache: pipeline::Cache::new(device, cache_width, cache_height),
+            filter_mode,
+            render_format,
+            depth_stencil_state: None,
+            data: Vec::new(),
+            data_index: 0,
         }
     }
 
@@ -279,8 +283,9 @@ impl<F: Font + Sync, H: BuildHasher> GlyphBrush<(), F, H> {
         target: &wgpu::TextureView,
         transform: [f32; 16],
     ) -> Result<(), String> {
+        self.alloc_data(device);
         self.process_queued(device, staging_belt, encoder);
-        self.pipeline.draw(
+        self.data[self.data_index].draw(
             device,
             staging_belt,
             encoder,
@@ -288,6 +293,8 @@ impl<F: Font + Sync, H: BuildHasher> GlyphBrush<(), F, H> {
             transform,
             None,
         );
+
+        self.data_index += 1;
 
         Ok(())
     }
@@ -313,8 +320,9 @@ impl<F: Font + Sync, H: BuildHasher> GlyphBrush<(), F, H> {
         transform: [f32; 16],
         region: Region,
     ) -> Result<(), String> {
+        self.alloc_data(device);
         self.process_queued(device, staging_belt, encoder);
-        self.pipeline.draw(
+        self.data[self.data_index].draw(
             device,
             staging_belt,
             encoder,
@@ -323,7 +331,24 @@ impl<F: Font + Sync, H: BuildHasher> GlyphBrush<(), F, H> {
             Some(region),
         );
 
+        self.data_index += 1;
+
         Ok(())
+    }
+
+    pub fn alloc_data(&mut self, device: &wgpu::Device) {
+        if self.data_index >= self.data.len() {
+            self.data.push(Pipeline::<()>::new(
+                device,
+                self.filter_mode,
+                self.render_format,
+                &self.cache
+            ));
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.data_index = 0;
     }
 }
 
@@ -338,15 +363,14 @@ impl<F: Font + Sync, H: BuildHasher> GlyphBrush<wgpu::DepthStencilState, F, H> {
         let glyph_brush = raw_builder.build();
         let (cache_width, cache_height) = glyph_brush.texture_dimensions();
         GlyphBrush {
-            pipeline: Pipeline::<wgpu::DepthStencilState>::new(
-                device,
-                filter_mode,
-                render_format,
-                depth_stencil_state,
-                cache_width,
-                cache_height,
-            ),
             glyph_brush,
+
+            cache: pipeline::Cache::new(device, cache_width, cache_height),
+            filter_mode,
+            render_format,
+            depth_stencil_state: Some(depth_stencil_state),
+            data: Vec::new() as Vec<Pipeline::<wgpu::DepthStencilState>>,
+            data_index: 0,
         }
     }
 
@@ -402,8 +426,9 @@ impl<F: Font + Sync, H: BuildHasher> GlyphBrush<wgpu::DepthStencilState, F, H> {
         depth_stencil_attachment: wgpu::RenderPassDepthStencilAttachment,
         transform: [f32; 16],
     ) -> Result<(), String> {
+        self.alloc_data(device);
         self.process_queued(device, staging_belt, encoder);
-        self.pipeline.draw(
+        self.data[self.data_index].draw(
             device,
             staging_belt,
             encoder,
@@ -412,6 +437,8 @@ impl<F: Font + Sync, H: BuildHasher> GlyphBrush<wgpu::DepthStencilState, F, H> {
             transform,
             None,
         );
+
+        self.data_index += 1;
 
         Ok(())
     }
@@ -438,9 +465,9 @@ impl<F: Font + Sync, H: BuildHasher> GlyphBrush<wgpu::DepthStencilState, F, H> {
         transform: [f32; 16],
         region: Region,
     ) -> Result<(), String> {
+        self.alloc_data(device);
         self.process_queued(device, staging_belt, encoder);
-
-        self.pipeline.draw(
+        self.data[self.data_index].draw(
             device,
             staging_belt,
             encoder,
@@ -450,7 +477,25 @@ impl<F: Font + Sync, H: BuildHasher> GlyphBrush<wgpu::DepthStencilState, F, H> {
             Some(region),
         );
 
+        self.data_index += 1;
+
         Ok(())
+    }
+
+    pub fn alloc_data(&mut self, device: &wgpu::Device) {
+        if self.data_index >= self.data.len() {
+            self.data.push(Pipeline::<wgpu::DepthStencilState>::new(
+                device,
+                self.filter_mode,
+                self.render_format,
+                self.depth_stencil_state.clone().unwrap(),
+                &self.cache
+            ));
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.data_index = 0;
     }
 }
 
